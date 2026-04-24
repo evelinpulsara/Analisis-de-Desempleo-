@@ -48,13 +48,13 @@ function Invoke-SparkClean {
 if (-not $SkipHadoopSetup) {
     $winutilsPath = Join-Path $HadoopHome "bin\winutils.exe"
     if (-not (Test-Path -LiteralPath $winutilsPath)) {
-        throw "No se encontro winutils.exe en $winutilsPath. Ajusta -HadoopHome o instala winutils."
-    }
-
-    $env:HADOOP_HOME = $HadoopHome
-    $hadoopBin = Join-Path $HadoopHome "bin"
-    if (-not (($env:PATH -split ";") -contains $hadoopBin)) {
-        $env:PATH = "$hadoopBin;$env:PATH"
+        Write-Warning "No se encontro winutils.exe en $winutilsPath. Se continuara sin configuracion Hadoop; spark_clean intentara fallback de escritura."
+    } else {
+        $env:HADOOP_HOME = $HadoopHome
+        $hadoopBin = Join-Path $HadoopHome "bin"
+        if (-not (($env:PATH -split ";") -contains $hadoopBin)) {
+            $env:PATH = "$hadoopBin;$env:PATH"
+        }
     }
 
     $sparkTmp = Join-Path $scriptDir ".spark-tmp"

@@ -1,5 +1,7 @@
 import argparse
+import os
 import re
+import shutil
 from pyspark.sql import SparkSession, functions as F, types as T
 from unidecode import unidecode
 
@@ -32,7 +34,15 @@ def trim_strings(df):
 def parse_dates(df, cols):
     for c in cols:
         if c in df.columns:
-            df = df.withColumn(c, F.to_date(F.col(c)))
+            cleaned = F.regexp_replace(F.trim(F.col(c).cast("string")), r'^"|"$', "")
+            df = df.withColumn(
+                c,
+                F.coalesce(
+                    F.to_date(cleaned, "yyyy-MM-dd"),
+                    F.to_date(cleaned, "dd/MM/yyyy"),
+                    F.to_date(cleaned, "MM/dd/yyyy"),
+                ),
+            )
     return df
 
 
@@ -111,6 +121,35 @@ def clean_planta_entidad(df):
     return df
 
 
+def is_windows_hadoop_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    patterns = [
+        "winutils.exe",
+        "hadoop_home and hadoop.home.dir are unset",
+        "windowsproblems",
+    ]
+    return any(p in text for p in patterns)
+
+
+def reset_output_path(path: str):
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    elif os.path.exists(path):
+        os.remove(path)
+    os.makedirs(path, exist_ok=True)
+
+
+def write_with_pandas_fallback(clean_df, output_path: str, output_csv_path: str | None = None):
+    pdf = clean_df.toPandas()
+
+    reset_output_path(output_path)
+    pdf.to_parquet(os.path.join(output_path, "part-00000.parquet"), index=False)
+
+    if output_csv_path:
+        reset_output_path(output_csv_path)
+        pdf.to_csv(os.path.join(output_csv_path, "part-00000.csv"), index=False, encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Ruta de entrada CSV o patrón glob")
@@ -123,6 +162,7 @@ def main():
         SparkSession.builder
         .appName(f"etl_{args.dataset}")
         .config("spark.sql.session.timeZone", "America/Bogota")
+        .config("spark.sql.ansi.enabled", "false")
         .getOrCreate()
     )
 
@@ -144,11 +184,18 @@ def main():
     else:
         clean_df = clean_planta_entidad(df)
 
-    clean_df.write.mode("overwrite").parquet(args.output)
-    if args.output_csv:
-        clean_df.coalesce(1).write.mode("overwrite").option("header", True).csv(args.output_csv)
-
     clean_df.show(10, truncate=False)
+    try:
+        clean_df.write.mode("overwrite").parquet(args.output)
+        if args.output_csv:
+            clean_df.coalesce(1).write.mode("overwrite").option("header", True).csv(args.output_csv)
+    except Exception as exc:
+        if is_windows_hadoop_error(exc):
+            print("ADVERTENCIA: fallo de Hadoop/Winutils en Windows; usando fallback pandas/pyarrow para escritura.")
+            write_with_pandas_fallback(clean_df, args.output, args.output_csv)
+        else:
+            raise
+
     spark.stop()
 
 
